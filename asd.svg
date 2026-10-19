@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3584e4"/>
+      <stop offset="100%" stop-color="#1c71d8"/>
+    </linearGradient>
+    <linearGradient id="noteGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f6f5f4"/>
+    </linearGradient>
+    <linearGradient id="lockGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f6d32d"/>
+      <stop offset="100%" stop-color="#e5a50a"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="125%" height="125%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- Base Document / Notepad -->
+  <rect x="22" y="16" width="84" height="96" rx="14" fill="#deddda" filter="url(#shadow)"/>
+  <rect x="24" y="18" width="80" height="92" rx="12" fill="url(#noteGrad)"/>
+
+  <!-- Top Accent Bar -->
+  <path d="M 24,30 A 12,12 0 0,1 36,18 L 92,18 A 12,12 0 0,1 104,30 L 104,34 L 24,34 Z" fill="url(#bgGrad)"/>
+
+  <!-- Notepad Lines -->
+  <line x1="38" y1="48" x2="90" y2="48" stroke="#9a9996" stroke-width="3" stroke-linecap="round"/>
+  <line x1="38" y1="60" x2="80" y2="60" stroke="#c0bfbc" stroke-width="3" stroke-linecap="round"/>
+  <line x1="38" y1="72" x2="68" y2="72" stroke="#c0bfbc" stroke-width="3" stroke-linecap="round"/>
+  <line x1="38" y1="84" x2="56" y2="84" stroke="#c0bfbc" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- Security Padlock Badge in Bottom Right -->
+  <g filter="url(#shadow)">
+    <!-- Shackle -->
+    <path d="M 76,78 L 76,70 C 76,62 92,62 92,70 L 92,78" fill="none" stroke="#5e5c64" stroke-width="4.5" stroke-linecap="round"/>
+    <!-- Body -->
+    <rect x="70" y="76" width="28" height="24" rx="6" fill="url(#lockGrad)"/>
+    <!-- Keyhole -->
+    <circle cx="84" cy="86" r="2.5" fill="#3d3846"/>
+    <polygon points="82.5,86 85.5,86 86,92 82,92" fill="#3d3846"/>
+  </g>
+</svg>
