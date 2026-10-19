@@ -11,7 +11,8 @@ Designed for speed, modern GNOME aesthetics, and zero-compromise privacy.
 To install Asd on any Ubuntu laptop or desktop:
 
 ```bash
-cd /home/stone/Projects/asd
+git clone https://github.com/stonemanhero/asd.git
+cd asd
 ./install.sh
 ```
 
