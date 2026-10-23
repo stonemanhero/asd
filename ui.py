@@ -17,6 +17,8 @@ import base64
 from datetime import datetime
 import json
 import os
+import secrets
+import string
 import sys
 from typing import Any, Callable, Dict, List, Optional
 
@@ -145,6 +147,43 @@ window.auth-mode .toast-overlay {
     opacity: 1.0;
     background-color: alpha(@window_fg_color, 0.12);
 }
+.pwd-popover-box {
+    padding: 16px;
+    min-width: 400px;
+}
+.pwd-display-entry {
+    font-family: monospace;
+    font-size: 1.05rem;
+    font-weight: 700;
+    padding: 8px 12px;
+    letter-spacing: 0.5px;
+}
+.pwd-badge {
+    font-size: 0.85rem;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 9999px;
+}
+.pwd-badge-very-low {
+    background-color: alpha(#e01b24, 0.15);
+    color: #e01b24;
+}
+.pwd-badge-low {
+    background-color: alpha(#ff7800, 0.15);
+    color: #ff7800;
+}
+.pwd-badge-medium {
+    background-color: alpha(#e5a50a, 0.18);
+    color: #e5a50a;
+}
+.pwd-badge-high {
+    background-color: alpha(#26a269, 0.15);
+    color: #26a269;
+}
+.pwd-badge-very-high {
+    background-color: alpha(#3584e4, 0.15);
+    color: #3584e4;
+}
 .error-banner {
     color: @destructive_color;
     font-weight: 600;
@@ -253,6 +292,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.current_note_id: Optional[int] = None
         self._save_timeout_id: Optional[int] = None
         self._status_clear_timeout_id: Optional[int] = None
+        self._last_pwd_level: int = 2
         self.vault_width: int = 960
         self.vault_height: int = 640
 
@@ -747,12 +787,20 @@ class MainWindow(Adw.ApplicationWindow):
         self.status_label.set_hexpand(True)
         self.status_label.add_css_class("dim-label")
 
+        self.pwd_gen_btn = Gtk.MenuButton()
+        self.pwd_gen_btn.set_icon_name("dialog-password-symbolic")
+        self.pwd_gen_btn.add_css_class("flat")
+        self.pwd_gen_btn.set_tooltip_text("Password Generator")
+        self.pwd_gen_popover = self._create_password_generator_popover()
+        self.pwd_gen_btn.set_popover(self.pwd_gen_popover)
+
         self.delete_btn = Gtk.Button.new_from_icon_name("user-trash-symbolic")
         self.delete_btn.add_css_class("destructive-action")
         self.delete_btn.set_tooltip_text("Delete Note")
         self.delete_btn.connect("clicked", self._on_delete_clicked)
 
         bottom_bar.append(self.status_label)
+        bottom_bar.append(self.pwd_gen_btn)
         bottom_bar.append(self.delete_btn)
         editor_box.append(bottom_bar)
 
@@ -1250,6 +1298,230 @@ class MainWindow(Adw.ApplicationWindow):
         self._show_saved_status()
         self.title_entry.grab_focus()
         self.title_entry.select_region(0, -1)
+
+    SECURITY_LEVELS: List[Dict[str, Any]] = [
+        {
+            "name": "Very Low",
+            "length": 8,
+            "desc": "8 chars • simple lowercase & digits",
+            "badge_class": "pwd-badge-very-low",
+        },
+        {
+            "name": "Low",
+            "length": 12,
+            "desc": "12 chars • letters & digits",
+            "badge_class": "pwd-badge-low",
+        },
+        {
+            "name": "Medium",
+            "length": 16,
+            "desc": "16 chars • letters, digits & symbols (!@#$%^&*)",
+            "badge_class": "pwd-badge-medium",
+        },
+        {
+            "name": "High",
+            "length": 20,
+            "desc": "20 chars • strong mix & symbols (!@#$%^&*-_=+?)",
+            "badge_class": "pwd-badge-high",
+        },
+        {
+            "name": "Very High",
+            "length": 32,
+            "desc": "32 chars • maximum entropy & full character pool",
+            "badge_class": "pwd-badge-very-high",
+        },
+    ]
+
+    def _generate_password(self, level_idx: int) -> str:
+        """Generate a cryptographically secure random password based on security level."""
+        rng = secrets.SystemRandom()
+        if level_idx == 0:  # Very Low
+            length = 8
+            pool = string.ascii_lowercase + string.digits
+            pwd = [secrets.choice(string.ascii_lowercase), secrets.choice(string.digits)]
+            pwd += [secrets.choice(pool) for _ in range(length - len(pwd))]
+        elif level_idx == 1:  # Low
+            length = 12
+            pool = string.ascii_letters + string.digits
+            pwd = [
+                secrets.choice(string.ascii_lowercase),
+                secrets.choice(string.ascii_uppercase),
+                secrets.choice(string.digits),
+            ]
+            pwd += [secrets.choice(pool) for _ in range(length - len(pwd))]
+        elif level_idx == 2:  # Medium
+            length = 16
+            symbols = "!@#$%^&*"
+            pool = string.ascii_letters + string.digits + symbols
+            pwd = [
+                secrets.choice(string.ascii_lowercase),
+                secrets.choice(string.ascii_uppercase),
+                secrets.choice(string.digits),
+                secrets.choice(symbols),
+            ]
+            pwd += [secrets.choice(pool) for _ in range(length - len(pwd))]
+        elif level_idx == 3:  # High
+            length = 20
+            symbols = "!@#$%^&*-_=+?"
+            pool = string.ascii_letters + string.digits + symbols
+            pwd = [
+                secrets.choice(string.ascii_lowercase),
+                secrets.choice(string.ascii_uppercase),
+                secrets.choice(string.digits),
+                secrets.choice(symbols),
+            ]
+            pwd += [secrets.choice(pool) for _ in range(length - len(pwd))]
+        else:  # Very High (4)
+            length = 32
+            symbols = "!@#$%^&*()-_=+[]{}|;:,.<>?"
+            pool = string.ascii_letters + string.digits + symbols
+            pwd = [
+                secrets.choice(string.ascii_lowercase),
+                secrets.choice(string.ascii_uppercase),
+                secrets.choice(string.digits),
+                secrets.choice(symbols),
+            ]
+            pwd += [secrets.choice(pool) for _ in range(length - len(pwd))]
+
+        rng.shuffle(pwd)
+        return "".join(pwd)
+
+    def _create_password_generator_popover(self) -> Gtk.Popover:
+        """Create a dedicated popover with a security level slider for generating passwords."""
+        popover = Gtk.Popover()
+        popover.add_css_class("pwd-popover-box")
+
+        container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        container.set_size_request(400, -1)
+        container.set_margin_top(16)
+        container.set_margin_bottom(16)
+        container.set_margin_start(16)
+        container.set_margin_end(16)
+
+        # Header: Title on Left, Color-Coded Security Pill on Right
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title_icon = Gtk.Image.new_from_icon_name("dialog-password-symbolic")
+        title_label = Gtk.Label()
+        title_label.set_markup("<b>Password Generator</b>")
+        title_box.append(title_icon)
+        title_box.append(title_label)
+        title_box.set_hexpand(True)
+        header_box.append(title_box)
+
+        badge_label = Gtk.Label(label="Medium")
+        badge_label.add_css_class("pwd-badge")
+        header_box.append(badge_label)
+        container.append(header_box)
+
+        # Subtitle / description label
+        desc_label = Gtk.Label()
+        desc_label.set_xalign(0.0)
+        container.append(desc_label)
+
+        # Slider (Gtk.Scale) from 0 to 4 with generous margins (34px) so mark labels never touch edges
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 4, 1)
+        scale.set_draw_value(False)
+        scale.set_round_digits(0)
+        scale.set_increments(1, 1)
+        scale.set_margin_start(34)
+        scale.set_margin_end(34)
+
+        for val, info in enumerate(self.SECURITY_LEVELS):
+            scale.add_mark(val, Gtk.PositionType.BOTTOM, info["name"])
+
+        container.append(scale)
+
+        # Display Box: Password Entry + Regenerate Button
+        display_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        display_box.set_margin_top(4)
+
+        pwd_entry = Gtk.Entry()
+        pwd_entry.set_hexpand(True)
+        pwd_entry.set_editable(False)
+        pwd_entry.set_can_focus(True)
+        pwd_entry.add_css_class("pwd-display-entry")
+        display_box.append(pwd_entry)
+
+        refresh_btn = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
+        refresh_btn.add_css_class("flat")
+        refresh_btn.add_css_class("circular")
+        refresh_btn.set_tooltip_text("Generate new password")
+        display_box.append(refresh_btn)
+        container.append(display_box)
+
+        # Action Buttons: [ Copy ] [ Insert at Cursor ]
+        actions_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        actions_box.set_margin_top(4)
+
+        copy_btn = Gtk.Button()
+        copy_btn.set_child(Adw.ButtonContent(icon_name="edit-copy-symbolic", label="Copy"))
+        copy_btn.set_hexpand(True)
+
+        insert_btn = Gtk.Button()
+        insert_btn.set_child(Adw.ButtonContent(icon_name="list-add-symbolic", label="Insert at Cursor"))
+        insert_btn.add_css_class("suggested-action")
+        insert_btn.set_hexpand(True)
+
+        actions_box.append(copy_btn)
+        actions_box.append(insert_btn)
+        container.append(actions_box)
+
+        def update_generated_pwd(*_args) -> None:
+            lvl = int(round(scale.get_value()))
+            lvl = max(0, min(lvl, len(self.SECURITY_LEVELS) - 1))
+            self._last_pwd_level = lvl
+            info = self.SECURITY_LEVELS[lvl]
+            pwd = self._generate_password(lvl)
+            pwd_entry.set_text(pwd)
+
+            # Update badge styling
+            for item in self.SECURITY_LEVELS:
+                badge_label.remove_css_class(item["badge_class"])
+            badge_label.add_css_class(info["badge_class"])
+            badge_label.set_text(f"{info['name']} • {info['length']} chars")
+
+            desc_escaped = GLib.markup_escape_text(info["desc"])
+            desc_label.set_markup(f"<span size='small' alpha='75%'>{desc_escaped}</span>")
+
+        scale.connect("value-changed", update_generated_pwd)
+        refresh_btn.connect("clicked", update_generated_pwd)
+
+        def on_copy_clicked(_btn: Gtk.Button) -> None:
+            pwd = pwd_entry.get_text()
+            if not pwd:
+                return
+            clipboard = Gdk.Display.get_default().get_clipboard()
+            clipboard.set(pwd)
+            popover.popdown()
+            lvl = int(round(scale.get_value()))
+            lvl = max(0, min(lvl, len(self.SECURITY_LEVELS) - 1))
+            lvl_name = self.SECURITY_LEVELS[lvl]["name"]
+            self.show_toast(f"Copied {lvl_name} password to clipboard")
+
+        copy_btn.connect("clicked", on_copy_clicked)
+
+        def on_insert_clicked(_btn: Gtk.Button) -> None:
+            pwd = pwd_entry.get_text()
+            if not pwd or self.current_note_id is None:
+                return
+            self.text_buffer.delete_selection(True, True)
+            self.text_buffer.insert_at_cursor(pwd)
+            self.text_view.grab_focus()
+            popover.popdown()
+            lvl = int(round(scale.get_value()))
+            lvl = max(0, min(lvl, len(self.SECURITY_LEVELS) - 1))
+            lvl_name = self.SECURITY_LEVELS[lvl]["name"]
+            self.show_toast(f"Inserted {lvl_name} password at cursor")
+
+        insert_btn.connect("clicked", on_insert_clicked)
+
+        # Set initial level to remembered level and generate
+        scale.set_value(self._last_pwd_level)
+        update_generated_pwd()
+
+        popover.set_child(container)
+        return popover
 
     def _update_row_copy_buttons(self) -> None:
         """Dynamically render an aligned copy button for every non-empty row in note content."""

@@ -16,6 +16,14 @@ cd asd
 ./install.sh
 ```
 
+### Updating Asd Across Multiple PCs
+To update Asd to the latest version on any PC:
+```bash
+cd asd
+./update.sh
+```
+This automatically pulls the latest changes from Git, stops the active background daemon, re-installs updated application files to `~/.local/share/asd/app/`, and relaunches the application with your encrypted notes preserved.
+
 ### What `install.sh` automatically does:
 1. **Checks & installs system dependencies** via `apt` (`python3-gi`, `gir1.2-gtk-4.0`, `gir1.2-adw-1`, `python3-cryptography`; system tray binds directly to native `libayatana-appindicator3`).
 2. **Deploys application files** cleanly to `~/.local/share/asd/app/`.
@@ -53,6 +61,16 @@ cd asd
   - **Zero Plaintext & No JSON Columns:** Backups are exported as raw binary `.asd` files (`asd_backup_YYYY-MM-DD.asd`). If opened in any text editor, there are **no JSON columns, no keys, and no plain text** — only raw encrypted ciphertext bytes.
   - **Cross-Vault Restore:** Automatically decrypts backups created with the same vault password, or challenges you for the master password used to create the backup, seamlessly re-encrypting the notes into your active vault.
   - Instant in-app feedback via native Libadwaita floating toasts (`Adw.Toast`).
+- **Password Generator with Security Slider (Next to Trash Can):**
+  - Dedicated key icon button (`dialog-password-symbolic`) in the editor's bottom action bar right next to the trash can ("Delete Note").
+  - Interactive security level slider (`Gtk.Scale`) with clean margin padding:
+    - **Very Low:** 8 characters (lowercase letters + numbers).
+    - **Low:** 12 characters (uppercase + lowercase + numbers).
+    - **Medium:** 16 characters (alphanumeric + standard symbols `!@#$%^&*`).
+    - **High:** 20 characters (alphanumeric + strong symbol set).
+    - **Very High:** 32 characters (maximum entropy, full character set).
+  - Cryptographically secure generation powered by Python's `secrets` module.
+  - Color-coded security pill badge, monospace preview, instant re-generate button, 1-click **Copy**, and 1-click **Insert at Cursor** (inserts password directly at active text cursor position or replaces active selection).
 - **Unified Focus Styling:**
   - Both Title entry and Content text box share matching rounded borders, subtle backgrounds, and accent focus rings on `:focus-within`.
 - **System Tray Integration:**
@@ -63,7 +81,7 @@ cd asd
   - **Out-of-Order Multi-Word Search:** Searching `milos aweb` instantly matches notes titled `awebdigital milos email` or notes where words appear in different positions.
   - **Cross-Field Matching:** Terms are evaluated across both title and content simultaneously (e.g. searching `email login` matches when `email` is in the title and `login` is in the body).
   - **Weighted Relevance Scoring:** Automatically prioritizes results with exact full query matches (+1000 for title, +500 for content), all tokens in title (+300), title prefix matches (+150), and token frequency, falling back to chronological recency.
-  - **Right Pane:** Modern editor with title entry, word-wrapped text editor with focus ring, dynamic auto-save status indicator (displays 'Saved' when data is saved for 2s, then disappears), per-row copy buttons (`edit-copy-symbolic`) aligned with each line of content for instant one-click copying of individual credentials/snippets, and confirmation-guarded trash can button (`user-trash-symbolic`) for note deletion.
+  - **Right Pane:** Modern editor with title entry, word-wrapped text editor with focus ring, dynamic auto-save status indicator (displays 'Saved' when data is saved for 2s, then disappears), per-row copy buttons (`edit-copy-symbolic`) aligned with each non-empty line of content for instant one-click copying of individual credentials/snippets, bottom action bar with password generator (`dialog-password-symbolic`) featuring a 5-tier security slider and 1-click insert at cursor, and confirmation-guarded trash can button (`user-trash-symbolic`) for note deletion.
   - **HeaderBar:** Quick `+ New Note`, primary menu button (`≡`) with options for Encrypted Backup/Restore (.asd), Lock Vault (`Ctrl+L`), About Asd, and **Exit** (completely shut down application and background daemon), alongside the dedicated `Lock Vault` quick action button.
 - **Simple All-in-One About Dialog:**
   - Accessible via primary menu (`≡`), tray icon menu, or `asd --about`.
@@ -77,6 +95,7 @@ cd asd
 ```
 .
 ├── install.sh     # One-click automated installer & launcher
+├── update.sh      # One-command updater across multiple PCs (pulls git & restarts app)
 ├── uninstall.sh   # Clean uninstaller script
 ├── asd.svg        # High-resolution custom SVG application icon
 ├── crypto.py      # Master password derivation (PBKDF2HMAC) and Fernet AES engine

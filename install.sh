@@ -83,6 +83,13 @@ else
     fi
 fi
 
+# Terminate running daemon instances to ensure updated files are cleanly deployed
+if command -v asd >/dev/null 2>&1; then
+    asd --quit 2>/dev/null || true
+fi
+pkill -f "python3.*asd/app/main.py" 2>/dev/null || true
+pkill -f "python3.*asd/app/tray.py" 2>/dev/null || true
+
 # 2. Install Application Files
 echo -e "${BLUE}[2/6] Installing application files to ${INSTALL_DIR}...${RESET}"
 mkdir -p "${INSTALL_DIR}"
