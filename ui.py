@@ -47,6 +47,81 @@ CUSTOM_CSS: str = """
     background-color: @card_bg_color;
     border-right: 1px solid alpha(@borders, 0.6);
 }
+
+/* Top Full-Width Favorites Bar */
+.favorites-bar {
+    background-color: alpha(@window_fg_color, 0.035);
+    border-bottom: 1px solid alpha(@borders, 0.45);
+    padding: 4px 8px;
+    min-height: 38px;
+}
+.favorites-star-lead {
+    color: #e5a50a;
+    opacity: 0.9;
+}
+.favorite-btn {
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    transition: all 120ms ease-in-out;
+}
+.favorite-btn:hover {
+    background-color: alpha(@window_fg_color, 0.08);
+}
+.favorite-btn.active-favorite {
+    background-color: alpha(@accent_color, 0.18);
+    color: @accent_color;
+    font-weight: 700;
+}
+.fav-key-badge {
+    font-size: 0.72rem;
+    font-weight: 800;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background-color: alpha(@window_fg_color, 0.1);
+    color: @window_fg_color;
+}
+.favorite-btn.active-favorite .fav-key-badge {
+    background-color: @accent_color;
+    color: #ffffff;
+}
+
+/* Left Sidebar Row Star Button */
+.row-star-btn {
+    padding: 2px;
+    min-width: 22px;
+    min-height: 22px;
+    border-radius: 9999px;
+    color: alpha(@window_fg_color, 0.3);
+    transition: all 150ms ease-in-out;
+}
+.row-star-btn:hover {
+    color: #f5c211;
+    opacity: 1.0;
+    background-color: alpha(@window_fg_color, 0.08);
+}
+.row-star-btn.is-favorite {
+    color: #e5a50a;
+    opacity: 1.0;
+}
+
+/* Note Editor Header Star Button */
+.editor-star-btn {
+    min-width: 38px;
+    min-height: 38px;
+    border-radius: 8px;
+    color: alpha(@window_fg_color, 0.35);
+    transition: all 150ms ease-in-out;
+}
+.editor-star-btn:hover {
+    color: #f5c211;
+    background-color: alpha(@window_fg_color, 0.08);
+}
+.editor-star-btn.is-favorite {
+    color: #e5a50a;
+}
+
 .note-row-box {
     padding: 8px 10px;
     border-radius: 8px;
@@ -203,12 +278,14 @@ class NoteRow(Gtk.ListBoxRow):
         note_id: int,
         title: str,
         content: str,
-        updated_at: str = ""
+        updated_at: str = "",
+        on_context_menu: Optional[Callable[[NoteRow, float, float], None]] = None,
     ) -> None:
         super().__init__()
         self.note_id: int = note_id
         self.raw_title: str = title
         self.raw_content: str = content
+        self.on_context_menu: Optional[Callable[[NoteRow, float, float], None]] = on_context_menu
 
         self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         self.box.add_css_class("note-row-box")
@@ -235,7 +312,17 @@ class NoteRow(Gtk.ListBoxRow):
         self.box.append(self.preview_label)
         self.set_child(self.box)
 
+        # Right-click gesture to trigger context menu (Add/remove favorite, delete, duplicate)
+        gesture = Gtk.GestureClick.new()
+        gesture.set_button(3)
+        gesture.connect("pressed", self._on_secondary_click)
+        self.add_controller(gesture)
+
         self.update_data(title, content, updated_at)
+
+    def _on_secondary_click(self, _gesture: Gtk.GestureClick, _n: int, x: float, y: float) -> None:
+        if self.on_context_menu:
+            self.on_context_menu(self, x, y)
 
     def update_data(self, title: str, content: str, updated_at: str = "") -> None:
         """Update the row's rendered title, first-row preview snippet, and timestamp."""
@@ -667,12 +754,40 @@ class MainWindow(Adw.ApplicationWindow):
         return handle
 
     def _build_vault_view(self) -> Gtk.Widget:
-        """Two-Pane Split View: Sidebar (search + note list) and Note Editor."""
+        """Two-Pane Split View: Sidebar (search + note list) and Note Editor with Top Favorites Bar."""
+        vault_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        vault_container.add_css_class("vault-container")
+
+        # --- TOP FAVORITES BAR (Full Width) ---
+        self.favorites_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.favorites_bar.add_css_class("favorites-bar")
+        self.favorites_bar.set_hexpand(True)
+
+        fav_star_lead = Gtk.Image.new_from_icon_name("starred-symbolic")
+        fav_star_lead.add_css_class("favorites-star-lead")
+        fav_star_lead.set_margin_start(6)
+        fav_star_lead.set_margin_end(2)
+        fav_star_lead.set_tooltip_text("Pinned Favorites (up to 10 • Ctrl+1..10 • Right-click button to remove)")
+        self.favorites_bar.append(fav_star_lead)
+
+        fav_scrolled = Gtk.ScrolledWindow()
+        fav_scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        fav_scrolled.set_hexpand(True)
+
+        self.favs_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.favs_btn_box.set_hexpand(True)
+        fav_scrolled.set_child(self.favs_btn_box)
+
+        self.favorites_bar.append(fav_scrolled)
+        vault_container.append(self.favorites_bar)
+
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.paned.add_css_class("vault-paned")
         self.paned.set_position(300)
         self.paned.set_shrink_start_child(False)
         self.paned.set_shrink_end_child(False)
+        self.paned.set_vexpand(True)
+        self.paned.set_hexpand(True)
 
         # --- LEFT PANE (Sidebar) ---
         left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -736,12 +851,26 @@ class MainWindow(Adw.ApplicationWindow):
         editor_box.set_margin_top(16)
         editor_box.set_margin_bottom(14)
 
-        # Title Entry with clean styling and focus border
+        # Title Entry and Star Button in horizontal row
+        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+
         self.title_entry = Gtk.Entry()
         self.title_entry.set_placeholder_text("Note Title...")
         self.title_entry.add_css_class("editor-title-entry")
+        self.title_entry.set_hexpand(True)
         self.title_entry.connect("changed", self._on_title_changed)
-        editor_box.append(self.title_entry)
+        title_box.append(self.title_entry)
+
+        self.editor_star_btn = Gtk.Button()
+        self.editor_star_btn.add_css_class("flat")
+        self.editor_star_btn.add_css_class("circular")
+        self.editor_star_btn.add_css_class("editor-star-btn")
+        self.editor_star_btn.set_tooltip_text("Add to Favorites (Ctrl+1..10)")
+        self.editor_star_btn.set_icon_name("non-starred-symbolic")
+        self.editor_star_btn.connect("clicked", self._on_editor_star_clicked)
+        title_box.append(self.editor_star_btn)
+
+        editor_box.append(title_box)
 
         # Content TextView & Per-Row Copy Column inside ScrolledWindow
         self.scrolled_editor = Gtk.ScrolledWindow()
@@ -808,11 +937,13 @@ class MainWindow(Adw.ApplicationWindow):
         self.editor_stack.set_visible_child_name("empty")
 
         self.paned.set_end_child(self.editor_stack)
-        return self.paned
+        vault_container.append(self.paned)
+        return vault_container
 
     def _setup_shortcuts(self) -> None:
         """Register application window keyboard shortcuts via Gtk.EventControllerKey."""
         key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         key_ctrl.connect("key-pressed", self._on_key_pressed)
         self.add_controller(key_ctrl)
 
@@ -833,6 +964,34 @@ class MainWindow(Adw.ApplicationWindow):
             return True
 
         if is_ctrl and not is_shift:
+            # Pinned Favorites shortcuts: Ctrl+1..9 and Ctrl+0 (for 10)
+            fav_keyvals = {
+                Gdk.KEY_1: 0,
+                Gdk.KEY_KP_1: 0,
+                Gdk.KEY_2: 1,
+                Gdk.KEY_KP_2: 1,
+                Gdk.KEY_3: 2,
+                Gdk.KEY_KP_3: 2,
+                Gdk.KEY_4: 3,
+                Gdk.KEY_KP_4: 3,
+                Gdk.KEY_5: 4,
+                Gdk.KEY_KP_5: 4,
+                Gdk.KEY_6: 5,
+                Gdk.KEY_KP_6: 5,
+                Gdk.KEY_7: 6,
+                Gdk.KEY_KP_7: 6,
+                Gdk.KEY_8: 7,
+                Gdk.KEY_KP_8: 7,
+                Gdk.KEY_9: 8,
+                Gdk.KEY_KP_9: 8,
+                Gdk.KEY_0: 9,
+                Gdk.KEY_KP_0: 9,
+            }
+            if keyval in fav_keyvals:
+                if self.crypto.is_unlocked:
+                    self.open_favorite_by_index(fav_keyvals[keyval])
+                    return True
+
             # Standard Ctrl Accelerators
             if keyval in (Gdk.KEY_n, Gdk.KEY_N):
                 if self.crypto.is_unlocked:
@@ -1129,7 +1288,8 @@ class MainWindow(Adw.ApplicationWindow):
                 note_id=note["id"],
                 title=note["title"],
                 content=note["content"],
-                updated_at=note.get("updated_at", "")
+                updated_at=note.get("updated_at", ""),
+                on_context_menu=self._show_row_context_menu,
             )
             self.notes_list.append(row)
             if self.current_note_id == note["id"]:
@@ -1149,7 +1309,12 @@ class MainWindow(Adw.ApplicationWindow):
         else:
             self.current_note_id = None
             self.editor_stack.set_visible_child_name("empty")
+            self._update_editor_star(False)
             GLib.idle_add(self._focus_widget, self.search_entry)
+
+        self._refresh_favorites_bar()
+        if self.current_note_id is not None:
+            self._update_editor_star(self.db.is_favorite(self.current_note_id))
 
     def _on_note_row_selected(self, list_box: Gtk.ListBox, row: Optional[Gtk.ListBoxRow]) -> None:
         """Load selected note into the editor pane."""
@@ -1180,6 +1345,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.text_buffer.set_text(note["content"])
         self.updating_ui = False
         self._update_row_copy_buttons()
+        self._update_editor_star(self.db.is_favorite(note["id"]))
+        self._refresh_favorites_bar()
 
         self.editor_stack.set_visible_child_name("editor")
 
@@ -1242,6 +1409,8 @@ class MainWindow(Adw.ApplicationWindow):
         row = self._find_row_by_id(self.current_note_id)
         if row:
             row.update_data(title, content)
+        if self.db.is_favorite(self.current_note_id):
+            self._refresh_favorites_bar()
 
         self._show_saved_status()
         return GLib.SOURCE_REMOVE
@@ -1523,6 +1692,340 @@ class MainWindow(Adw.ApplicationWindow):
         popover.set_child(container)
         return popover
 
+
+    # --- Favorites Bar & Shortcuts ---
+
+    def _refresh_favorites_bar(self) -> None:
+        """Render up to 10 favorite note buttons in the top full-width favorites bar."""
+        if not hasattr(self, "favs_btn_box") or not self.crypto.is_unlocked:
+            return
+
+        while True:
+            child = self.favs_btn_box.get_first_child()
+            if child is None:
+                break
+            self.favs_btn_box.remove(child)
+
+        favs = self.db.get_favorite_notes()
+        if not favs:
+            hint = Gtk.Label()
+            hint.set_markup("<span alpha='55%' size='small'><i>No favorites pinned yet. Left-click ★ on any note to pin here (up to 10) • Access with Ctrl+1..10</i></span>")
+            hint.set_xalign(0.0)
+            hint.set_margin_start(4)
+            self.favs_btn_box.append(hint)
+            return
+
+        for idx, fav in enumerate(favs[:10]):
+            key_num = (idx + 1) if idx < 9 else 0
+            shortcut_str = f"Ctrl+{idx + 1}" if idx < 9 else "Ctrl+0"
+            note_id = fav["id"]
+            note_title = fav["title"].strip() if fav["title"].strip() else "Untitled Note"
+
+            btn = Gtk.Button()
+            btn.add_css_class("flat")
+            btn.add_css_class("favorite-btn")
+            if note_id == self.current_note_id:
+                btn.add_css_class("active-favorite")
+
+            btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+
+            badge = Gtk.Label()
+            badge.set_text(str(key_num))
+            badge.add_css_class("fav-key-badge")
+            btn_box.append(badge)
+
+            title_lbl = Gtk.Label(label=note_title)
+            title_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            title_lbl.set_max_width_chars(15)
+            btn_box.append(title_lbl)
+
+            btn.set_child(btn_box)
+            btn.set_tooltip_text(
+                f"Favorite {idx + 1}: {note_title}\n"
+                f"Shortcut: {shortcut_str}\n"
+                f"• Left-click to load note\n"
+                f"• Right-click to remove from favorites"
+            )
+
+            # Left click -> Load note
+            btn.connect("clicked", lambda _, nid=note_id: self.open_note_by_id(nid))
+
+            # Right click -> Show menu to remove from favorites
+            gesture = Gtk.GestureClick.new()
+            gesture.set_button(3)  # Gdk.BUTTON_SECONDARY
+            gesture.connect(
+                "pressed",
+                lambda _g, _n, x, y, b=btn, nid=note_id, title=note_title: self._on_favorite_right_click(b, nid, title, x, y)
+            )
+            btn.add_controller(gesture)
+
+            self.favs_btn_box.append(btn)
+
+    def _on_favorite_right_click(
+        self,
+        btn: Gtk.Button,
+        note_id: int,
+        note_title: str,
+        x: float,
+        y: float
+    ) -> None:
+        """Show context popover menu on right-click of a top favorite button with 'Remove from Favorites'."""
+        popover = Gtk.Popover()
+        popover.set_parent(btn)
+        popover.set_has_arrow(True)
+
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        popover.set_pointing_to(rect)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        vbox.set_margin_top(4)
+        vbox.set_margin_bottom(4)
+        vbox.set_margin_start(4)
+        vbox.set_margin_end(4)
+
+        rem_content = Adw.ButtonContent(icon_name="non-starred-symbolic", label="Remove from Favorites")
+        rem_content.set_halign(Gtk.Align.START)
+        rem_btn = Gtk.Button()
+        rem_btn.set_child(rem_content)
+        rem_btn.add_css_class("flat")
+        rem_btn.set_halign(Gtk.Align.FILL)
+
+        def on_rem_clicked(_: Gtk.Button) -> None:
+            popover.popdown()
+            self.remove_favorite(note_id)
+            self.show_toast(f"Removed '{note_title}' from favorites")
+
+        rem_btn.connect("clicked", on_rem_clicked)
+        vbox.append(rem_btn)
+
+        popover.set_child(vbox)
+        popover.popup()
+
+    def remove_favorite(self, note_id: int) -> None:
+        """Remove a note from favorites and synchronize all UI elements."""
+        self.db.remove_favorite(note_id)
+        self._update_note_favorite_state(note_id, False)
+        self._refresh_favorites_bar()
+
+    def toggle_favorite(self, note_id: int) -> None:
+        """Toggle favorite status for note_id and refresh UI."""
+        if self.db.is_favorite(note_id):
+            self.remove_favorite(note_id)
+            self.show_toast("Removed from favorites")
+        else:
+            if not self.db.add_favorite(note_id):
+                self.show_toast("Maximum 10 favorites reached (Ctrl+1..10). Remove one first.")
+                return
+            self._update_note_favorite_state(note_id, True)
+            self._refresh_favorites_bar()
+            fav_ids = self.db.get_favorite_ids()
+            idx = fav_ids.index(note_id) if note_id in fav_ids else len(fav_ids) - 1
+            shortcut = f"Ctrl+{idx + 1}" if idx < 9 else "Ctrl+0"
+            self.show_toast(f"Added to favorites ({shortcut})")
+
+    def _show_row_context_menu(self, row: NoteRow, x: float, y: float) -> None:
+        """Show context popover menu on right-click of a sidebar note row."""
+        popover = Gtk.Popover()
+        popover.set_parent(row)
+        popover.set_has_arrow(True)
+
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        popover.set_pointing_to(rect)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        vbox.set_margin_top(4)
+        vbox.set_margin_bottom(4)
+        vbox.set_margin_start(4)
+        vbox.set_margin_end(4)
+
+        is_fav = self.db.is_favorite(row.note_id)
+        fav_label = "Remove from Favorites" if is_fav else "Add to Favorites"
+        fav_icon = "starred-symbolic" if is_fav else "non-starred-symbolic"
+
+        # 1. Add / Remove Favorites
+        fav_content = Adw.ButtonContent(icon_name=fav_icon, label=fav_label)
+        fav_content.set_halign(Gtk.Align.START)
+        fav_btn = Gtk.Button()
+        fav_btn.set_child(fav_content)
+        fav_btn.add_css_class("flat")
+        fav_btn.set_halign(Gtk.Align.FILL)
+
+        def on_fav_clicked(_: Gtk.Button) -> None:
+            popover.popdown()
+            self.toggle_favorite(row.note_id)
+
+        fav_btn.connect("clicked", on_fav_clicked)
+        vbox.append(fav_btn)
+
+        # 2. Duplicate Note
+        dup_content = Adw.ButtonContent(icon_name="edit-copy-symbolic", label="Duplicate")
+        dup_content.set_halign(Gtk.Align.START)
+        dup_btn = Gtk.Button()
+        dup_btn.set_child(dup_content)
+        dup_btn.add_css_class("flat")
+        dup_btn.set_halign(Gtk.Align.FILL)
+
+        def on_dup_clicked(_: Gtk.Button) -> None:
+            popover.popdown()
+            self.duplicate_note(row.note_id)
+
+        dup_btn.connect("clicked", on_dup_clicked)
+        vbox.append(dup_btn)
+
+        # Separator
+        vbox.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # 3. Delete Note
+        del_content = Adw.ButtonContent(icon_name="user-trash-symbolic", label="Delete")
+        del_content.set_halign(Gtk.Align.START)
+        del_btn = Gtk.Button()
+        del_btn.set_child(del_content)
+        del_btn.add_css_class("flat")
+        del_btn.add_css_class("destructive-action")
+        del_btn.set_halign(Gtk.Align.FILL)
+
+        def on_del_clicked(_: Gtk.Button) -> None:
+            popover.popdown()
+            self.confirm_delete_note(row.note_id)
+
+        del_btn.connect("clicked", on_del_clicked)
+        vbox.append(del_btn)
+
+        popover.set_child(vbox)
+        popover.popup()
+
+    def duplicate_note(self, note_id: int) -> None:
+        """Duplicate an existing note and select the copy."""
+        self._flush_pending_save()
+        orig = self.db.get_note(note_id)
+        if not orig:
+            return
+
+        orig_title = orig["title"].strip() if orig["title"].strip() else "Untitled Note"
+        dup_title = f"{orig_title} (Copy)"
+        dup_content = orig["content"]
+
+        new_id = self.db.create_note(title=dup_title, content=dup_content)
+        self.current_note_id = new_id
+        self.search_entry.set_text("")
+        self.refresh_notes_list("")
+
+        row = self._find_row_by_id(new_id)
+        if row:
+            self.notes_list.select_row(row)
+
+        self._show_saved_status()
+        self.show_toast(f"Duplicated note: {dup_title}")
+
+    def confirm_delete_note(self, note_id: int) -> None:
+        """Prompt confirmation and delete a specific note."""
+        note = self.db.get_note(note_id)
+        note_title = note["title"] if note else "Untitled Note"
+
+        def do_delete() -> None:
+            if self.current_note_id == note_id:
+                if self._save_timeout_id is not None:
+                    GLib.source_remove(self._save_timeout_id)
+                    self._save_timeout_id = None
+                if self._status_clear_timeout_id is not None:
+                    GLib.source_remove(self._status_clear_timeout_id)
+                    self._status_clear_timeout_id = None
+                self.status_label.set_text("")
+                self.current_note_id = None
+                self.updating_ui = True
+                self.title_entry.set_text("")
+                self.text_buffer.set_text("")
+                self.updating_ui = False
+                self._update_editor_star(False)
+
+            self.db.delete_note(note_id)
+            self._refresh_favorites_bar()
+            self.refresh_notes_list()
+            self.show_toast(f"Deleted '{note_title}' securely")
+
+        self._show_confirm_dialog(
+            title="Delete Note?",
+            body=f"Are you sure you want to permanently delete '{note_title}'? This action cannot be undone.",
+            on_confirm=do_delete
+        )
+
+    def _on_editor_star_clicked(self, _btn: Gtk.Button) -> None:
+        """Handle clicking star in note editor header when note is loaded."""
+        if self.current_note_id is not None:
+            self.toggle_favorite(self.current_note_id)
+
+    def _update_note_favorite_state(self, note_id: int, is_fav: bool) -> None:
+        """Update visual star state in editor header."""
+        if self.current_note_id == note_id:
+            self._update_editor_star(is_fav)
+
+    def _update_editor_star(self, is_fav: bool) -> None:
+        """Update star button in note editor header."""
+        if not hasattr(self, "editor_star_btn"):
+            return
+        if is_fav:
+            self.editor_star_btn.set_icon_name("starred-symbolic")
+            self.editor_star_btn.add_css_class("is-favorite")
+            self.editor_star_btn.set_tooltip_text("Remove from favorites")
+        else:
+            self.editor_star_btn.set_icon_name("non-starred-symbolic")
+            self.editor_star_btn.remove_css_class("is-favorite")
+            self.editor_star_btn.set_tooltip_text("Add to favorites (Ctrl+1..10)")
+
+    def open_note_by_id(self, note_id: int) -> None:
+        """Open and load a note by its ID into the editor."""
+        self._flush_pending_save()
+        if self.current_note_id == note_id:
+            self.text_view.grab_focus()
+            return
+
+        row = self._find_row_by_id(note_id)
+        if row is None:
+            # If search filter is active and hiding the note, clear search filter
+            if self.search_entry.get_text():
+                self.search_entry.set_text("")
+                self.refresh_notes_list("")
+                row = self._find_row_by_id(note_id)
+
+        if row is not None:
+            self.notes_list.select_row(row)
+        else:
+            # Fallback direct load
+            note = self.db.get_note(note_id)
+            if note:
+                self.updating_ui = True
+                self.current_note_id = note["id"]
+                self.title_entry.set_text(note["title"])
+                self.title_entry.select_region(0, 0)
+                self.text_buffer.set_text(note["content"])
+                self.updating_ui = False
+                self._update_row_copy_buttons()
+                self._update_editor_star(self.db.is_favorite(note_id))
+                self.editor_stack.set_visible_child_name("editor")
+
+        self._refresh_favorites_bar()
+        self.text_view.grab_focus()
+
+    def open_favorite_by_index(self, index: int) -> None:
+        """Open favorite note by index 0..9 (Ctrl+1..10)."""
+        fav_notes = self.db.get_favorite_notes()
+        if 0 <= index < len(fav_notes):
+            fav = fav_notes[index]
+            self.open_note_by_id(fav["id"])
+            shortcut = f"Ctrl+{index + 1}" if index < 9 else "Ctrl+0"
+            self.show_toast(f"Opened Favorite ({shortcut}): {fav['title']}")
+        else:
+            shortcut = f"Ctrl+{index + 1}" if index < 9 else "Ctrl+0"
+            self.show_toast(f"No favorite assigned to {shortcut}")
+
     def _update_row_copy_buttons(self) -> None:
         """Dynamically render an aligned copy button for every non-empty row in note content."""
         if not hasattr(self, "row_copy_box"):
@@ -1593,6 +2096,8 @@ class MainWindow(Adw.ApplicationWindow):
             self.title_entry.set_text("")
             self.text_buffer.set_text("")
             self.updating_ui = False
+            self._update_editor_star(False)
+            self._refresh_favorites_bar()
             self.refresh_notes_list()
 
         self._show_confirm_dialog(

@@ -61,6 +61,21 @@ This automatically pulls the latest changes from Git, stops the active backgroun
   - **Zero Plaintext & No JSON Columns:** Backups are exported as raw binary `.asd` files (`asd_backup_YYYY-MM-DD.asd`). If opened in any text editor, there are **no JSON columns, no keys, and no plain text** — only raw encrypted ciphertext bytes.
   - **Cross-Vault Restore:** Automatically decrypts backups created with the same vault password, or challenges you for the master password used to create the backup, seamlessly re-encrypting the notes into your active vault.
   - Instant in-app feedback via native Libadwaita floating toasts (`Adw.Toast`).
+- **Full-Width Pinned Favorites Bar (Top of Workspace):**
+  - First thing displayed at full width across the top of the vault view.
+  - Pin up to **10 favorite notes** for instant access.
+  - Quick-load any favorite with a single click or global in-app keyboard shortcut: **`Ctrl+1` through `Ctrl+9`** (favorites 1–9) and **`Ctrl+0`** (10th favorite).
+  - **Add / Remove favorites:**
+    - Right-click any note in the left sidebar to open its context menu and select **"Add to Favorites"** (or **"Remove from Favorites"**).
+    - Or click the star button (`★`) in the note editor header when a note is loaded.
+  - **Remove from favorites bar:** Right-click any favorite button in the top bar and select **"Remove from Favorites"**.
+  - Active favorite note is highlighted dynamically in the top bar.
+- **Sidebar Right-Click Context Menu:**
+  - Right-clicking any note on the search/sidebar list opens a clean menu with:
+    - **Add to Favorites / Remove from Favorites**
+    - **Duplicate Note:** Instant duplicate copy preserving title and content.
+    - **Delete Note:** Confirmation-guarded permanent deletion.
+
 - **Password Generator with Security Slider (Next to Trash Can):**
   - Dedicated key icon button (`dialog-password-symbolic`) in the editor's bottom action bar right next to the trash can ("Delete Note").
   - Interactive security level slider (`Gtk.Scale`) with clean margin padding:

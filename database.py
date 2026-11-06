@@ -2,7 +2,8 @@
 """
 database.py — SQLite storage manager with transparent encryption/decryption for Asd.
 
-Stores encrypted master credentials in 'meta' and AES-encrypted notes in 'notes'.
+Stores encrypted master credentials in 'meta', AES-encrypted notes in 'notes',
+and pinned favorites in 'favorites'.
 """
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ class DatabaseManager:
             self.conn.execute("PRAGMA journal_mode = WAL;")
             self.conn.execute("PRAGMA synchronous = NORMAL;")
             self.conn.execute("PRAGMA secure_delete = ON;")
+            self.conn.execute("PRAGMA foreign_keys = ON;")
             self.conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS meta (
@@ -70,6 +72,15 @@ class DatabaseManager:
                     title TEXT NOT NULL,
                     content TEXT NOT NULL,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS favorites (
+                    note_id INTEGER PRIMARY KEY,
+                    position INTEGER NOT NULL,
+                    FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE
                 );
                 """
             )
@@ -131,9 +142,18 @@ class DatabaseManager:
             )
 
     def delete_note(self, note_id: int) -> None:
-        """Permanently delete a note by ID."""
+        """Permanently delete a note by ID and clean up favorites."""
         with self.conn:
+            self.conn.execute("DELETE FROM favorites WHERE note_id = ?", (note_id,))
             self.conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT note_id FROM favorites ORDER BY position ASC")
+            remaining = cursor.fetchall()
+            for idx, r in enumerate(remaining):
+                self.conn.execute(
+                    "UPDATE favorites SET position = ? WHERE note_id = ?",
+                    (idx, r["note_id"])
+                )
 
     def get_note(self, note_id: int) -> Optional[Dict[str, Any]]:
         """Fetch and decrypt a specific note by ID."""
@@ -162,6 +182,88 @@ class DatabaseManager:
             "content": dec_content,
             "updated_at": row["updated_at"],
         }
+
+    # --- Favorites Management (Up to 10 pinned notes) ---
+
+    def get_favorite_ids(self) -> List[int]:
+        """Return ordered list of up to 10 favorite note IDs."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT f.note_id
+            FROM favorites f
+            JOIN notes n ON f.note_id = n.id
+            ORDER BY f.position ASC
+            LIMIT 10
+            """
+        )
+        return [row["note_id"] for row in cursor.fetchall()]
+
+    def is_favorite(self, note_id: int) -> bool:
+        """Check if a note_id is currently pinned in favorites."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT 1 FROM favorites WHERE note_id = ?", (note_id,))
+        return cursor.fetchone() is not None
+
+    def add_favorite(self, note_id: int) -> bool:
+        """Add note_id to favorites if fewer than 10 favorites exist. Returns True if added."""
+        favs = self.get_favorite_ids()
+        if note_id in favs:
+            return True
+        if len(favs) >= 10:
+            return False
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO favorites (note_id, position) VALUES (?, ?)",
+                (note_id, len(favs))
+            )
+        return True
+
+    def remove_favorite(self, note_id: int) -> bool:
+        """Remove note_id from favorites and re-index remaining positions."""
+        with self.conn:
+            self.conn.execute("DELETE FROM favorites WHERE note_id = ?", (note_id,))
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT note_id FROM favorites ORDER BY position ASC")
+            remaining = cursor.fetchall()
+            for idx, row in enumerate(remaining):
+                self.conn.execute(
+                    "UPDATE favorites SET position = ? WHERE note_id = ?",
+                    (idx, row["note_id"])
+                )
+        return True
+
+    def get_favorite_notes(self) -> List[Dict[str, Any]]:
+        """Return decrypted favorite notes ordered by position (up to 10)."""
+        if not self.crypto.is_unlocked:
+            return []
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT n.id, n.title, n.content, n.updated_at, f.position
+            FROM favorites f
+            JOIN notes n ON f.note_id = n.id
+            ORDER BY f.position ASC
+            LIMIT 10
+            """
+        )
+        rows = cursor.fetchall()
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                dec_title = self.crypto.decrypt(row["title"])
+                dec_content = self.crypto.decrypt(row["content"])
+            except Exception:
+                dec_title = "[Decryption Error]"
+                dec_content = ""
+            results.append({
+                "id": row["id"],
+                "title": dec_title,
+                "content": dec_content,
+                "updated_at": row["updated_at"],
+                "position": row["position"],
+            })
+        return results
 
     def get_notes(self, search_query: str = "") -> List[Dict[str, Any]]:
         """
