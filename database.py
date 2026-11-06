@@ -3,13 +3,14 @@
 database.py — SQLite storage manager with transparent encryption/decryption for Asd.
 
 Stores encrypted master credentials in 'meta', AES-encrypted notes in 'notes',
-and pinned favorites in 'favorites'.
+pinned favorites in 'favorites', and manages cloud synchronization metadata.
 """
 
 from __future__ import annotations
 
 import os
 import sqlite3
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from gi.repository import GLib
 
@@ -69,9 +70,11 @@ class DatabaseManager:
                 """
                 CREATE TABLE IF NOT EXISTS notes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uuid TEXT UNIQUE,
                     title TEXT NOT NULL,
                     content TEXT NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_deleted INTEGER NOT NULL DEFAULT 0
                 );
                 """
             )
@@ -84,6 +87,25 @@ class DatabaseManager:
                 );
                 """
             )
+
+            # Migration: Ensure existing tables have uuid and is_deleted columns
+            cursor = self.conn.cursor()
+            cursor.execute("PRAGMA table_info(notes)")
+            cols = [col["name"] for col in cursor.fetchall()]
+
+            if "uuid" not in cols:
+                self.conn.execute("ALTER TABLE notes ADD COLUMN uuid TEXT")
+            if "is_deleted" not in cols:
+                self.conn.execute("ALTER TABLE notes ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
+
+            # Backfill any existing notes lacking a UUID
+            cursor.execute("SELECT id FROM notes WHERE uuid IS NULL OR uuid = ''")
+            rows = cursor.fetchall()
+            for r in rows:
+                new_uuid = str(uuid.uuid4())
+                self.conn.execute("UPDATE notes SET uuid = ? WHERE id = ?", (new_uuid, r["id"]))
+
+            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_uuid ON notes(uuid)")
 
     def is_initialized(self) -> bool:
         """Check if salt and verify_token exist in the meta table."""
@@ -114,19 +136,69 @@ class DatabaseManager:
         meta_dict = {row["key"]: bytes(row["value"]) for row in rows}
         return meta_dict.get("salt"), meta_dict.get("verify_token")
 
-    def create_note(self, title: str = "Untitled Note", content: str = "") -> int:
+    # --- Sync Settings & Metadata Storage in 'meta' ---
+
+    def get_meta_string(self, key: str, default: str = "") -> str:
+        """Retrieve a string configuration value from meta table."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT value FROM meta WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        if row and row["value"]:
+            try:
+                return bytes(row["value"]).decode("utf-8")
+            except Exception:
+                return default
+        return default
+
+    def set_meta_string(self, key: str, value: str) -> None:
+        """Store a string configuration value in meta table."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (key, sqlite3.Binary(value.encode("utf-8")))
+            )
+
+    def get_sync_settings(self) -> Dict[str, Any]:
+        """Retrieve cloud sync configuration."""
+        url = self.get_meta_string("sync_url", "")
+        api_key = self.get_meta_string("sync_api_key", "")
+        auto_sync = self.get_meta_string("sync_auto", "false").lower() == "true"
+        last_sync = self.get_meta_string("sync_last_time", "")
+        return {
+            "url": url,
+            "api_key": api_key,
+            "auto_sync": auto_sync,
+            "last_sync": last_sync,
+        }
+
+    def save_sync_settings(self, url: str, api_key: str, auto_sync: bool) -> None:
+        """Save cloud sync configuration."""
+        self.set_meta_string("sync_url", url.strip())
+        self.set_meta_string("sync_api_key", api_key.strip())
+        self.set_meta_string("sync_auto", "true" if auto_sync else "false")
+
+    def create_note(
+        self,
+        title: str = "Untitled Note",
+        content: str = "",
+        note_uuid: Optional[str] = None
+    ) -> int:
         """
         Encrypt and insert a new note into the database.
         Returns the new note's ID.
         """
         enc_title = self.crypto.encrypt(title)
         enc_content = self.crypto.encrypt(content)
+        u = note_uuid if note_uuid else str(uuid.uuid4())
 
         with self.conn:
             cursor = self.conn.cursor()
             cursor.execute(
-                "INSERT INTO notes (title, content, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-                (enc_title, enc_content)
+                """
+                INSERT INTO notes (uuid, title, content, updated_at, is_deleted)
+                VALUES (?, ?, ?, strftime('%Y-%m-%d %H:%M:%S', 'now'), 0)
+                """,
+                (u, enc_title, enc_content)
             )
             return int(cursor.lastrowid)
 
@@ -137,15 +209,29 @@ class DatabaseManager:
 
         with self.conn:
             self.conn.execute(
-                "UPDATE notes SET title = ?, content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                """
+                UPDATE notes
+                SET title = ?, content = ?, updated_at = strftime('%Y-%m-%d %H:%M:%S', 'now')
+                WHERE id = ?
+                """,
                 (enc_title, enc_content, note_id)
             )
 
     def delete_note(self, note_id: int) -> None:
-        """Permanently delete a note by ID and clean up favorites."""
+        """
+        Soft delete note (set is_deleted = 1) so deletions sync across devices,
+        and clean up favorites.
+        """
         with self.conn:
             self.conn.execute("DELETE FROM favorites WHERE note_id = ?", (note_id,))
-            self.conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+            self.conn.execute(
+                """
+                UPDATE notes
+                SET is_deleted = 1, updated_at = strftime('%Y-%m-%d %H:%M:%S', 'now')
+                WHERE id = ?
+                """,
+                (note_id,)
+            )
             cursor = self.conn.cursor()
             cursor.execute("SELECT note_id FROM favorites ORDER BY position ASC")
             remaining = cursor.fetchall()
@@ -162,7 +248,7 @@ class DatabaseManager:
 
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT id, title, content, updated_at FROM notes WHERE id = ?",
+            "SELECT id, uuid, title, content, updated_at, is_deleted FROM notes WHERE id = ? AND is_deleted = 0",
             (note_id,)
         )
         row = cursor.fetchone()
@@ -178,9 +264,11 @@ class DatabaseManager:
 
         return {
             "id": row["id"],
+            "uuid": row["uuid"],
             "title": dec_title,
             "content": dec_content,
             "updated_at": row["updated_at"],
+            "is_deleted": row["is_deleted"],
         }
 
     # --- Favorites Management (Up to 10 pinned notes) ---
@@ -193,6 +281,7 @@ class DatabaseManager:
             SELECT f.note_id
             FROM favorites f
             JOIN notes n ON f.note_id = n.id
+            WHERE n.is_deleted = 0
             ORDER BY f.position ASC
             LIMIT 10
             """
@@ -240,9 +329,10 @@ class DatabaseManager:
         cursor = self.conn.cursor()
         cursor.execute(
             """
-            SELECT n.id, n.title, n.content, n.updated_at, f.position
+            SELECT n.id, n.uuid, n.title, n.content, n.updated_at, f.position
             FROM favorites f
             JOIN notes n ON f.note_id = n.id
+            WHERE n.is_deleted = 0
             ORDER BY f.position ASC
             LIMIT 10
             """
@@ -258,6 +348,7 @@ class DatabaseManager:
                 dec_content = ""
             results.append({
                 "id": row["id"],
+                "uuid": row["uuid"],
                 "title": dec_title,
                 "content": dec_content,
                 "updated_at": row["updated_at"],
@@ -267,10 +358,8 @@ class DatabaseManager:
 
     def get_notes(self, search_query: str = "") -> List[Dict[str, Any]]:
         """
-        Fetch all notes, decrypt their titles and contents in memory,
+        Fetch all active notes, decrypt their titles and contents in memory,
         and optionally filter case-insensitively by search_query.
-        Supports multi-term tokenized search (all terms matched across title and content)
-        with relevance scoring (exact phrase match, title matches, term frequency).
         Ordered by relevance score DESC, then updated_at DESC, id DESC.
         """
         if not self.crypto.is_unlocked:
@@ -278,7 +367,12 @@ class DatabaseManager:
 
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT id, title, content, updated_at FROM notes ORDER BY updated_at DESC, id DESC"
+            """
+            SELECT id, uuid, title, content, updated_at, is_deleted
+            FROM notes
+            WHERE is_deleted = 0
+            ORDER BY updated_at DESC, id DESC
+            """
         )
         rows = cursor.fetchall()
 
@@ -303,34 +397,28 @@ class DatabaseManager:
                 if not all(token in combined_lower for token in query_tokens):
                     continue
 
-                # Relevance scoring:
-                # 1. Exact full query in title (+1000)
                 if query_str in title_lower:
                     score += 1000
-                # 2. Exact full query in content (+500)
                 elif query_str in content_lower:
                     score += 500
 
-                # 3. All tokens in title (+300)
                 if all(token in title_lower for token in query_tokens):
                     score += 300
 
-                # 4. Title starts with any token (+150)
                 if any(title_lower.startswith(token) for token in query_tokens):
                     score += 150
 
-                # 5. Token counts in title (+50 per token match)
                 for token in query_tokens:
                     if token in title_lower:
                         score += 50
 
-                # 6. Token counts in content (+10 per token match)
                 for token in query_tokens:
                     if token in content_lower:
                         score += 10
 
             results.append({
                 "id": row["id"],
+                "uuid": row["uuid"],
                 "title": dec_title,
                 "content": dec_content,
                 "updated_at": row["updated_at"],
@@ -344,6 +432,94 @@ class DatabaseManager:
             item.pop("_score", None)
 
         return results
+
+    # --- Cloud Sync Operations ---
+
+    def get_notes_for_sync(self, since: str = "") -> List[Dict[str, Any]]:
+        """
+        Retrieve notes (including soft-deleted tombstones) modified since 'since'
+        in raw encrypted ciphertext form for cloud synchronization.
+        """
+        cursor = self.conn.cursor()
+        if since:
+            cursor.execute(
+                """
+                SELECT uuid, title, content, updated_at, is_deleted
+                FROM notes
+                WHERE updated_at > ?
+                ORDER BY updated_at ASC
+                """,
+                (since,)
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT uuid, title, content, updated_at, is_deleted
+                FROM notes
+                ORDER BY updated_at ASC
+                """
+            )
+
+        rows = cursor.fetchall()
+        payload = []
+        for r in rows:
+            payload.append({
+                "uuid": r["uuid"],
+                "enc_title": r["title"],
+                "enc_content": r["content"],
+                "updated_at": r["updated_at"],
+                "is_deleted": bool(r["is_deleted"]),
+            })
+        return payload
+
+    def apply_remote_sync_note(
+        self,
+        note_uuid: str,
+        enc_title: str,
+        enc_content: str,
+        updated_at: str,
+        is_deleted: bool
+    ) -> bool:
+        """
+        Apply a remote note change from the server.
+        Rule: "last updated_at wins".
+        Returns True if a local record was inserted or updated.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id, updated_at, is_deleted FROM notes WHERE uuid = ?", (note_uuid,))
+        existing = cursor.fetchone()
+
+        del_int = 1 if is_deleted else 0
+
+        with self.conn:
+            if existing:
+                local_updated_at = existing["updated_at"]
+                # If local version is newer than remote version, local wins
+                if local_updated_at and local_updated_at > updated_at:
+                    return False
+
+                # Remote version is newer or equal: update local
+                self.conn.execute(
+                    """
+                    UPDATE notes
+                    SET title = ?, content = ?, updated_at = ?, is_deleted = ?
+                    WHERE uuid = ?
+                    """,
+                    (enc_title, enc_content, updated_at, del_int, note_uuid)
+                )
+                if is_deleted:
+                    self.conn.execute("DELETE FROM favorites WHERE note_id = ?", (existing["id"],))
+                return True
+            else:
+                # Insert new note from remote
+                self.conn.execute(
+                    """
+                    INSERT INTO notes (uuid, title, content, updated_at, is_deleted)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (note_uuid, enc_title, enc_content, updated_at, del_int)
+                )
+                return True
 
     def enforce_file_permissions(self) -> None:
         """Ensure the database directory (0700) and database files (0600) have strict POSIX permissions."""

@@ -61,6 +61,14 @@ This automatically pulls the latest changes from Git, stops the active backgroun
   - **Zero Plaintext & No JSON Columns:** Backups are exported as raw binary `.asd` files (`asd_backup_YYYY-MM-DD.asd`). If opened in any text editor, there are **no JSON columns, no keys, and no plain text** — only raw encrypted ciphertext bytes.
   - **Cross-Vault Restore:** Automatically decrypts backups created with the same vault password, or challenges you for the master password used to create the backup, seamlessly re-encrypting the notes into your active vault.
   - Instant in-app feedback via native Libadwaita floating toasts (`Adw.Toast`).
+- **End-to-End Encrypted Cloud Sync (Personal PHP Server):**
+  - **Zero-Knowledge Architecture:** Notes are always encrypted on your local device before transmission. The server only receives and stores raw encrypted ciphertext strings (`enc_title`, `enc_content`). The server never knows or sees your plaintext notes.
+  - **Two-Way Synchronization:** Uploads local changes and downloads remote changes seamlessly.
+  - **Conflict Handling ("Last updated_at wins"):** Remote and local timestamps are compared per note. The latest modification wins without corrupting or losing data.
+  - **Auto-Sync on Unlock:** Enable "Auto-Sync on Unlock" in settings to automatically sync notes in the background as soon as you enter your master password.
+  - **Manual Sync:** Click **Main Menu (≡) -> Sync Now** anytime to run a manual sync.
+  - **Sync Settings Dialog:** Accessible via **Main Menu (≡) -> Sync Settings...** to configure your server sync URL, private Bearer API key, and auto-sync preference.
+
 - **Full-Width Pinned Favorites Bar (Top of Workspace):**
   - First thing displayed at full width across the top of the vault view.
   - Pin up to **10 favorite notes** for instant access.
@@ -112,6 +120,7 @@ This automatically pulls the latest changes from Git, stops the active backgroun
 ├── install.sh     # One-click automated installer & launcher
 ├── update.sh      # One-command updater across multiple PCs (pulls git & restarts app)
 ├── uninstall.sh   # Clean uninstaller script
+├── sync.php       # Zero-knowledge PHP synchronization API script for your server
 ├── asd.svg        # High-resolution custom SVG application icon
 ├── crypto.py      # Master password derivation (PBKDF2HMAC) and Fernet AES engine
 ├── database.py    # SQLite storage manager with transparent encryption/decryption

@@ -20,6 +20,9 @@ import os
 import secrets
 import string
 import sys
+import threading
+import urllib.error
+import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
 import gi
@@ -422,6 +425,7 @@ class MainWindow(Adw.ApplicationWindow):
     def show_toast(self, message: str) -> None:
         """Surface an Adw.Toast message."""
         toast = Adw.Toast.new(message)
+        toast.set_use_markup(False)
         toast.set_timeout(2)
         self.toast_overlay.add_toast(toast)
 
@@ -462,6 +466,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.menu_button.set_tooltip_text("Main Menu")
 
         menu = Gio.Menu()
+        menu_sync = Gio.Menu()
+        menu_sync.append("Sync Now", "win.sync_now")
+        menu_sync.append("Sync Settings...", "win.sync_settings")
+        menu.append_section("Cloud Sync", menu_sync)
+
         menu_vault = Gio.Menu()
         menu_vault.append("Export Encrypted Vault (.asd)...", "win.export_asd")
         menu_vault.append("Import Encrypted Vault (.asd)...", "win.import_asd")
@@ -513,6 +522,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _setup_actions(self) -> None:
         """Register window-level Gio.SimpleActions for menus and accelerators."""
+        self._add_win_action("sync_now", lambda *_: self.sync_now())
+        self._add_win_action("sync_settings", lambda *_: self.show_sync_settings_dialog())
         self._add_win_action("export_asd", lambda *_: self.export_encrypted_vault())
         self._add_win_action("import_asd", lambda *_: self.import_encrypted_vault())
         self._add_win_action("lock_vault", lambda *_: self.lock_vault())
@@ -604,6 +615,7 @@ class MainWindow(Adw.ApplicationWindow):
     def show_toast(self, message: str) -> None:
         """Display an Adw.Toast floating notification banner."""
         toast = Adw.Toast.new(message)
+        toast.set_use_markup(False)
         toast.set_timeout(3)
         self.toast_overlay.add_toast(toast)
 
@@ -1172,6 +1184,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_default_size(self.vault_width, self.vault_height)
         if self.is_visible() and present:
             self.present()
+
+        # Auto-sync on unlock if enabled in settings
+        sync_cfg = self.db.get_sync_settings()
+        if sync_cfg.get("auto_sync") and sync_cfg.get("url") and sync_cfg.get("api_key"):
+            GLib.idle_add(lambda: self.sync_now(silent=True) and False)
 
     # --- Setup & Unlock Actions ---
 
@@ -2139,6 +2156,158 @@ class MainWindow(Adw.ApplicationWindow):
             dialog.set_close_response("cancel")
             dialog.connect("response", on_response)
             dialog.present()
+
+
+    # --- Encrypted Cloud Synchronization ---
+
+    def show_sync_settings_dialog(self) -> None:
+        """Display the Cloud Sync Configuration dialog."""
+        settings = self.db.get_sync_settings()
+
+        dialog = Adw.PreferencesDialog()
+        dialog.set_title("Cloud Sync Settings")
+
+        page = Adw.PreferencesPage()
+        grp = Adw.PreferencesGroup(
+            title="Sync Server Configuration",
+            description="End-to-end encrypted note synchronization with your personal PHP server."
+        )
+
+        url_row = Adw.EntryRow(title="Server Sync URL")
+        url_row.set_text(settings.get("url", ""))
+
+        key_row = Adw.PasswordEntryRow(title="Sync API Key (Bearer Token)")
+        key_row.set_text(settings.get("api_key", ""))
+
+        auto_row = Adw.SwitchRow(
+            title="Auto-Sync on Unlock",
+            subtitle="Automatically sync notes whenever the master password is entered."
+        )
+        auto_row.set_active(settings.get("auto_sync", False))
+
+        grp.add(url_row)
+        grp.add(key_row)
+        grp.add(auto_row)
+        page.add(grp)
+        dialog.add(page)
+
+        def on_closed(_dialog: Adw.PreferencesDialog) -> None:
+            new_url = url_row.get_text().strip()
+            new_key = "".join(key_row.get_text().split())
+            new_auto = auto_row.get_active()
+            self.db.save_sync_settings(new_url, new_key, new_auto)
+            self.show_toast("Sync settings saved")
+
+        dialog.connect("closed", on_closed)
+        dialog.present(self)
+
+    def sync_now(self, silent: bool = False) -> None:
+        """
+        Execute two-way end-to-end encrypted sync in a background worker thread.
+        Sends dirty local notes, receives remote notes, and updates SQLite.
+        """
+        if not self.crypto.is_unlocked:
+            return
+
+        settings = self.db.get_sync_settings()
+        url = settings.get("url", "").strip()
+        api_key = "".join(settings.get("api_key", "").split())
+        last_sync = settings.get("last_sync", "").strip()
+
+        if not url or not api_key:
+            if not silent:
+                self.show_toast("Please configure Sync URL and API Key in Main Menu -> Sync Settings")
+                self.show_sync_settings_dialog()
+            return
+
+        if not silent:
+            self.show_toast("Syncing encrypted notes...")
+
+        # Flush any pending edits before syncing
+        self._flush_pending_save()
+
+        # Prepare payload: encrypted note records
+        notes_payload = self.db.get_notes_for_sync()
+
+        def worker() -> None:
+            req_data = json.dumps({
+                "last_sync": last_sync,
+                "notes": notes_payload,
+            }, ensure_ascii=False).encode("utf-8")
+
+            req = urllib.request.Request(
+                url,
+                data=req_data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                    "X-API-Key": api_key,
+                    "User-Agent": "Asd-Vault-Client/1.0",
+                },
+                method="POST"
+            )
+
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    resp_body = resp.read().decode("utf-8")
+                    result = json.loads(resp_body)
+            except urllib.error.HTTPError as he:
+                err_msg = f"HTTP {he.code}: {he.reason}"
+                try:
+                    err_json = json.loads(he.read().decode("utf-8"))
+                    if "error" in err_json:
+                        err_msg = err_json["error"]
+                except Exception:
+                    pass
+                GLib.idle_add(self._on_sync_failed, err_msg, silent)
+                return
+            except Exception as ex:
+                GLib.idle_add(self._on_sync_failed, str(ex), silent)
+                return
+
+            if not result.get("success"):
+                err_msg = result.get("error", "Unknown server sync error")
+                GLib.idle_add(self._on_sync_failed, err_msg, silent)
+                return
+
+            GLib.idle_add(self._on_sync_success, result, silent)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_sync_failed(self, error: str, silent: bool) -> bool:
+        if not silent:
+            self.show_toast(f"Sync failed: {error}")
+        return GLib.SOURCE_REMOVE
+
+    def _on_sync_success(self, result: Dict[str, Any], silent: bool) -> bool:
+        remote_notes = result.get("remote_notes", [])
+        server_ts = result.get("sync_timestamp", "")
+
+        applied_remote = 0
+        for rn in remote_notes:
+            u = rn.get("uuid")
+            enc_t = rn.get("enc_title", "")
+            enc_c = rn.get("enc_content", "")
+            upd = rn.get("updated_at", "")
+            is_del = bool(rn.get("is_deleted", False))
+
+            if not u:
+                continue
+
+            if self.db.apply_remote_sync_note(u, enc_t, enc_c, upd, is_del):
+                applied_remote += 1
+
+        if server_ts:
+            self.db.set_meta_string("sync_last_time", server_ts)
+
+        self.refresh_notes_list()
+        self._refresh_favorites_bar()
+
+        msg = f"Sync complete: {applied_remote} remote changes updated"
+        if not silent or applied_remote > 0:
+            self.show_toast(msg)
+
+        return GLib.SOURCE_REMOVE
 
     # --- Pure Encrypted Binary .asd Import & Export Engine ---
 
