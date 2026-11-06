@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from gi.repository import GLib
 
@@ -97,6 +98,16 @@ class DatabaseManager:
                 self.conn.execute("ALTER TABLE notes ADD COLUMN uuid TEXT")
             if "is_deleted" not in cols:
                 self.conn.execute("ALTER TABLE notes ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
+            if "favorite_pos" not in cols:
+                self.conn.execute("ALTER TABLE notes ADD COLUMN favorite_pos INTEGER NOT NULL DEFAULT -1")
+                self.conn.execute("""
+                    UPDATE notes
+                    SET favorite_pos = (
+                        SELECT position FROM favorites WHERE favorites.note_id = notes.id
+                    ),
+                    updated_at = strftime('%Y-%m-%d %H:%M:%S', 'now')
+                    WHERE id IN (SELECT note_id FROM favorites)
+                """)
 
             # Backfill any existing notes lacking a UUID
             cursor.execute("SELECT id FROM notes WHERE uuid IS NULL OR uuid = ''")
@@ -106,6 +117,7 @@ class DatabaseManager:
                 self.conn.execute("UPDATE notes SET uuid = ? WHERE id = ?", (new_uuid, r["id"]))
 
             self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_uuid ON notes(uuid)")
+            self._rebuild_favorites_table()
 
     def is_initialized(self) -> bool:
         """Check if salt and verify_token exist in the meta table."""
@@ -195,8 +207,8 @@ class DatabaseManager:
             cursor = self.conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO notes (uuid, title, content, updated_at, is_deleted)
-                VALUES (?, ?, ?, strftime('%Y-%m-%d %H:%M:%S', 'now'), 0)
+                INSERT INTO notes (uuid, title, content, updated_at, is_deleted, favorite_pos)
+                VALUES (?, ?, ?, strftime('%Y-%m-%d %H:%M:%S', 'now'), 0, -1)
                 """,
                 (u, enc_title, enc_content)
             )
@@ -222,24 +234,17 @@ class DatabaseManager:
         Soft delete note (set is_deleted = 1) so deletions sync across devices,
         and clean up favorites.
         """
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         with self.conn:
-            self.conn.execute("DELETE FROM favorites WHERE note_id = ?", (note_id,))
             self.conn.execute(
                 """
                 UPDATE notes
-                SET is_deleted = 1, updated_at = strftime('%Y-%m-%d %H:%M:%S', 'now')
+                SET is_deleted = 1, favorite_pos = -1, updated_at = ?
                 WHERE id = ?
                 """,
-                (note_id,)
+                (now_str, note_id)
             )
-            cursor = self.conn.cursor()
-            cursor.execute("SELECT note_id FROM favorites ORDER BY position ASC")
-            remaining = cursor.fetchall()
-            for idx, r in enumerate(remaining):
-                self.conn.execute(
-                    "UPDATE favorites SET position = ? WHERE note_id = ?",
-                    (idx, r["note_id"])
-                )
+            self._rebuild_favorites_table()
 
     def get_note(self, note_id: int) -> Optional[Dict[str, Any]]:
         """Fetch and decrypt a specific note by ID."""
@@ -273,6 +278,41 @@ class DatabaseManager:
 
     # --- Favorites Management (Up to 10 pinned notes) ---
 
+    def rebuild_favorites_table(self) -> None:
+        self._rebuild_favorites_table_internal()
+
+    _rebuild_favorites_table = rebuild_favorites_table
+
+    def _rebuild_favorites_table_internal(self) -> None:
+        """Synchronize favorites table with notes.favorite_pos (up to 10 active favorites)."""
+        self.conn.execute("DELETE FROM favorites")
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id
+            FROM notes
+            WHERE favorite_pos >= 0 AND is_deleted = 0
+            ORDER BY favorite_pos ASC, updated_at DESC
+            LIMIT 10
+            """
+        )
+        valid_favs = cursor.fetchall()
+        valid_ids = []
+        for idx, row in enumerate(valid_favs):
+            nid = row["id"]
+            valid_ids.append(nid)
+            self.conn.execute("UPDATE notes SET favorite_pos = ? WHERE id = ?", (idx, nid))
+            self.conn.execute("INSERT OR REPLACE INTO favorites (note_id, position) VALUES (?, ?)", (nid, idx))
+
+        if valid_ids:
+            placeholders = ",".join("?" for _ in valid_ids)
+            self.conn.execute(
+                f"UPDATE notes SET favorite_pos = -1 WHERE favorite_pos >= 0 AND id NOT IN ({placeholders})",
+                valid_ids
+            )
+        else:
+            self.conn.execute("UPDATE notes SET favorite_pos = -1 WHERE favorite_pos >= 0")
+
     def get_favorite_ids(self) -> List[int]:
         """Return ordered list of up to 10 favorite note IDs."""
         cursor = self.conn.cursor()
@@ -301,25 +341,25 @@ class DatabaseManager:
             return True
         if len(favs) >= 10:
             return False
+        pos = len(favs)
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         with self.conn:
             self.conn.execute(
+                "UPDATE notes SET favorite_pos = ?, updated_at = ? WHERE id = ?",
+                (pos, now_str, note_id)
+            )
+            self.conn.execute(
                 "INSERT OR REPLACE INTO favorites (note_id, position) VALUES (?, ?)",
-                (note_id, len(favs))
+                (note_id, pos)
             )
         return True
 
     def remove_favorite(self, note_id: int) -> bool:
         """Remove note_id from favorites and re-index remaining positions."""
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         with self.conn:
-            self.conn.execute("DELETE FROM favorites WHERE note_id = ?", (note_id,))
-            cursor = self.conn.cursor()
-            cursor.execute("SELECT note_id FROM favorites ORDER BY position ASC")
-            remaining = cursor.fetchall()
-            for idx, row in enumerate(remaining):
-                self.conn.execute(
-                    "UPDATE favorites SET position = ? WHERE note_id = ?",
-                    (idx, row["note_id"])
-                )
+            self.conn.execute("UPDATE notes SET favorite_pos = -1, updated_at = ? WHERE id = ?", (now_str, note_id))
+            self._rebuild_favorites_table()
         return True
 
     def get_favorite_notes(self) -> List[Dict[str, Any]]:
@@ -444,7 +484,7 @@ class DatabaseManager:
         if since:
             cursor.execute(
                 """
-                SELECT uuid, title, content, updated_at, is_deleted
+                SELECT uuid, title, content, updated_at, is_deleted, favorite_pos
                 FROM notes
                 WHERE updated_at > ?
                 ORDER BY updated_at ASC
@@ -454,7 +494,7 @@ class DatabaseManager:
         else:
             cursor.execute(
                 """
-                SELECT uuid, title, content, updated_at, is_deleted
+                SELECT uuid, title, content, updated_at, is_deleted, favorite_pos
                 FROM notes
                 ORDER BY updated_at ASC
                 """
@@ -463,12 +503,14 @@ class DatabaseManager:
         rows = cursor.fetchall()
         payload = []
         for r in rows:
+            fav = r["favorite_pos"]
             payload.append({
                 "uuid": r["uuid"],
                 "enc_title": r["title"],
                 "enc_content": r["content"],
                 "updated_at": r["updated_at"],
                 "is_deleted": bool(r["is_deleted"]),
+                "favorite_pos": int(fav) if (fav is not None and fav >= 0) else -1,
             })
         return payload
 
@@ -478,7 +520,8 @@ class DatabaseManager:
         enc_title: str,
         enc_content: str,
         updated_at: str,
-        is_deleted: bool
+        is_deleted: bool,
+        favorite_pos: int = -1
     ) -> bool:
         """
         Apply a remote note change from the server.
@@ -486,38 +529,37 @@ class DatabaseManager:
         Returns True if a local record was inserted or updated.
         """
         cursor = self.conn.cursor()
-        cursor.execute("SELECT id, updated_at, is_deleted FROM notes WHERE uuid = ?", (note_uuid,))
+        cursor.execute("SELECT id, updated_at, is_deleted, favorite_pos FROM notes WHERE uuid = ?", (note_uuid,))
         existing = cursor.fetchone()
 
         del_int = 1 if is_deleted else 0
+        fav_int = -1 if is_deleted else (int(favorite_pos) if favorite_pos is not None else -1)
 
         with self.conn:
             if existing:
                 local_updated_at = existing["updated_at"]
-                # If local version is newer than remote version, local wins
-                if local_updated_at and local_updated_at > updated_at:
+                # If local version is newer or equal, local wins / already up to date
+                if local_updated_at and local_updated_at >= updated_at:
                     return False
 
-                # Remote version is newer or equal: update local
+                # Remote version is strictly newer: update local
                 self.conn.execute(
                     """
                     UPDATE notes
-                    SET title = ?, content = ?, updated_at = ?, is_deleted = ?
+                    SET title = ?, content = ?, updated_at = ?, is_deleted = ?, favorite_pos = ?
                     WHERE uuid = ?
                     """,
-                    (enc_title, enc_content, updated_at, del_int, note_uuid)
+                    (enc_title, enc_content, updated_at, del_int, fav_int, note_uuid)
                 )
-                if is_deleted:
-                    self.conn.execute("DELETE FROM favorites WHERE note_id = ?", (existing["id"],))
                 return True
             else:
                 # Insert new note from remote
                 self.conn.execute(
                     """
-                    INSERT INTO notes (uuid, title, content, updated_at, is_deleted)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO notes (uuid, title, content, updated_at, is_deleted, favorite_pos)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (note_uuid, enc_title, enc_content, updated_at, del_int)
+                    (note_uuid, enc_title, enc_content, updated_at, del_int, fav_int)
                 )
                 return True
 

@@ -2294,18 +2294,23 @@ class MainWindow(Adw.ApplicationWindow):
             if not u:
                 continue
 
-            if self.db.apply_remote_sync_note(u, enc_t, enc_c, upd, is_del):
+            fav_pos = int(rn.get("favorite_pos", -1))
+            if self.db.apply_remote_sync_note(u, enc_t, enc_c, upd, is_del, fav_pos):
                 applied_remote += 1
+
+        if applied_remote > 0:
+            self.db.rebuild_favorites_table()
+            self.refresh_notes_list()
+            self._refresh_favorites_bar()
 
         if server_ts:
             self.db.set_meta_string("sync_last_time", server_ts)
 
-        self.refresh_notes_list()
-        self._refresh_favorites_bar()
-
-        msg = f"Sync complete: {applied_remote} remote changes updated"
-        if not silent or applied_remote > 0:
-            self.show_toast(msg)
+        if not silent:
+            if applied_remote > 0:
+                self.show_toast(f"Sync complete: {applied_remote} remote changes updated")
+            else:
+                self.show_toast("Sync complete: All notes up to date")
 
         return GLib.SOURCE_REMOVE
 
