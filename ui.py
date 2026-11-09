@@ -40,7 +40,7 @@ ASD_MAGIC: bytes = b"ASD\x01"
 AUTH_UNLOCK_WIDTH: int = 380
 AUTH_UNLOCK_HEIGHT: int = 310
 AUTH_SETUP_WIDTH: int = 400
-AUTH_SETUP_HEIGHT: int = 370
+AUTH_SETUP_HEIGHT: int = 440
 
 CUSTOM_CSS: str = """
 .vault-paned {
@@ -691,6 +691,30 @@ class MainWindow(Adw.ApplicationWindow):
         form_box.append(self.setup_confirm_entry)
         form_box.append(self.setup_error_label)
         form_box.append(self.init_btn)
+
+        # Or connect to existing sync server
+        or_sep = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        or_sep.set_margin_top(8)
+        or_sep.set_margin_bottom(2)
+        sep1 = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        sep1.set_hexpand(True)
+        sep1.set_valign(Gtk.Align.CENTER)
+        sep2 = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        sep2.set_hexpand(True)
+        sep2.set_valign(Gtk.Align.CENTER)
+        or_lbl = Gtk.Label(label="or")
+        or_lbl.add_css_class("dim-label")
+        or_sep.append(sep1)
+        or_sep.append(or_lbl)
+        or_sep.append(sep2)
+
+        connect_cloud_btn = Gtk.Button(label="🔗 Connect to Existing Sync Server")
+        connect_cloud_btn.add_css_class("flat")
+        connect_cloud_btn.add_css_class("pill")
+        connect_cloud_btn.connect("clicked", lambda _: self.show_connect_cloud_dialog())
+
+        form_box.append(or_sep)
+        form_box.append(connect_cloud_btn)
 
         card.append(form_box)
         overlay.set_child(card)
@@ -2158,6 +2182,159 @@ class MainWindow(Adw.ApplicationWindow):
             dialog.present()
 
 
+    def show_connect_cloud_dialog(self) -> None:
+        """Display dialog to link with an existing cloud sync vault on initial setup."""
+        dialog = Adw.PreferencesDialog()
+        dialog.set_title("Connect to Sync Server")
+
+        page = Adw.PreferencesPage()
+        grp = Adw.PreferencesGroup(
+            title="Existing Cloud Vault",
+            description="Connect to your personal sync server to decrypt and restore your notes automatically without moving files."
+        )
+
+        settings = self.db.get_sync_settings()
+        url_row = Adw.EntryRow(title="Server Sync URL")
+        url_row.set_text(settings.get("url", "") or "https://asd.sajber.rs/sync.php")
+
+        key_row = Adw.PasswordEntryRow(title="Sync API Key")
+        key_row.set_text(settings.get("api_key", ""))
+
+        pwd_row = Adw.PasswordEntryRow(title="Master Password (of Cloud Vault)")
+
+        status_label = Gtk.Label(label="")
+        status_label.add_css_class("error-banner")
+        status_label.set_visible(False)
+        status_label.set_wrap(True)
+
+        grp.add(url_row)
+        grp.add(key_row)
+        grp.add(pwd_row)
+
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        btn_box.set_margin_top(16)
+        btn_box.set_margin_bottom(8)
+
+        connect_btn = Gtk.Button(label="Connect & Restore Vault")
+        connect_btn.add_css_class("suggested-action")
+        connect_btn.add_css_class("pill")
+
+        btn_box.append(status_label)
+        btn_box.append(connect_btn)
+        grp.add(btn_box)
+
+        page.add(grp)
+        dialog.add(page)
+
+        def on_connect_clicked(_btn: Gtk.Button) -> None:
+            url = url_row.get_text().strip()
+            key = "".join(key_row.get_text().split())
+            pwd = pwd_row.get_text()
+
+            if not url or not key:
+                status_label.set_text("Please enter Sync URL and API Key.")
+                status_label.set_visible(True)
+                return
+            if not pwd:
+                status_label.set_text("Please enter your Master Password.")
+                status_label.set_visible(True)
+                return
+
+            connect_btn.set_sensitive(False)
+            status_label.set_text("Connecting to sync server...")
+            status_label.set_visible(True)
+
+            def worker() -> None:
+                def on_error(msg: str) -> None:
+                    connect_btn.set_sensitive(True)
+                    status_label.set_text(msg)
+                    status_label.set_visible(True)
+
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "X-API-Key": key,
+                        "User-Agent": "Asd-Vault-Client/1.0",
+                    },
+                    method="GET"
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=12) as resp:
+                        res = json.loads(resp.read().decode("utf-8"))
+                except Exception as ex:
+                    GLib.idle_add(lambda: on_error(f"Connection failed: {ex}"))
+                    return
+
+                vault_info = res.get("vault", {})
+                if not vault_info.get("has_vault"):
+                    GLib.idle_add(lambda: on_error("No cloud vault found on server. Please sync from your main PC first."))
+                    return
+
+                salt_b64 = vault_info.get("salt", "")
+                verify_b64 = vault_info.get("verify_token", "")
+                try:
+                    salt_bytes = base64.b64decode(salt_b64)
+                    verify_bytes = base64.b64decode(verify_b64)
+                except Exception:
+                    GLib.idle_add(lambda: on_error("Corrupted vault credentials returned by server."))
+                    return
+
+                if not self.crypto.unlock(pwd, salt_bytes, verify_bytes):
+                    GLib.idle_add(lambda: on_error("Incorrect Master Password for this cloud vault."))
+                    return
+
+                post_req = urllib.request.Request(
+                    url,
+                    data=json.dumps({"last_sync": "", "notes": []}).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-API-Key": key,
+                        "Authorization": f"Bearer {key}",
+                        "User-Agent": "Asd-Vault-Client/1.0",
+                    },
+                    method="POST"
+                )
+                try:
+                    with urllib.request.urlopen(post_req, timeout=15) as post_resp:
+                        sync_res = json.loads(post_resp.read().decode("utf-8"))
+                except Exception as ex:
+                    GLib.idle_add(lambda: on_error(f"Failed to fetch notes: {ex}"))
+                    return
+
+                def on_success() -> None:
+                    self.db.replace_master_credentials(salt_bytes, verify_bytes)
+                    self.db.save_sync_settings(url, key, True)
+                    self.db.reset_local_vault_notes()
+
+                    applied = 0
+                    for rn in sync_res.get("remote_notes", []):
+                        note_uuid = rn.get("uuid")
+                        enc_t = rn.get("enc_title", "")
+                        enc_c = rn.get("enc_content", "")
+                        upd = rn.get("updated_at", "")
+                        is_del = bool(rn.get("is_deleted", False))
+                        fav_pos = int(rn.get("favorite_pos", -1))
+                        if note_uuid and self.db.apply_remote_sync_note(note_uuid, enc_t, enc_c, upd, is_del, fav_pos):
+                            applied += 1
+
+                    server_ts = sync_res.get("sync_timestamp", "")
+                    if server_ts:
+                        self.db.set_meta_string("sync_last_time", server_ts)
+
+                    self.db.rebuild_favorites_table()
+                    dialog.close()
+                    self.show_vault_view()
+                    self.refresh_notes_list()
+                    self._refresh_favorites_bar()
+                    self.show_toast(f"Cloud vault connected! {applied} notes restored.")
+
+                GLib.idle_add(on_success)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        connect_btn.connect("clicked", on_connect_clicked)
+        dialog.present(self)
+
     # --- Encrypted Cloud Synchronization ---
 
     def show_sync_settings_dialog(self) -> None:
@@ -2226,14 +2403,20 @@ class MainWindow(Adw.ApplicationWindow):
         # Flush any pending edits before syncing
         self._flush_pending_save()
 
-        # Prepare payload: encrypted note records
+        # Prepare payload: encrypted note records and vault credentials
         notes_payload = self.db.get_notes_for_sync()
+        local_salt_b64, local_verify_b64 = self.db.get_master_credentials_b64()
 
         def worker() -> None:
-            req_data = json.dumps({
+            req_dict: Dict[str, Any] = {
                 "last_sync": last_sync,
                 "notes": notes_payload,
-            }, ensure_ascii=False).encode("utf-8")
+            }
+            if local_salt_b64 and local_verify_b64:
+                req_dict["vault_salt"] = local_salt_b64
+                req_dict["vault_verify_token"] = local_verify_b64
+
+            req_data = json.dumps(req_dict, ensure_ascii=False).encode("utf-8")
 
             req = urllib.request.Request(
                 url,
@@ -2279,7 +2462,80 @@ class MainWindow(Adw.ApplicationWindow):
             self.show_toast(f"Sync failed: {error}")
         return GLib.SOURCE_REMOVE
 
+    def _prompt_cloud_vault_adoption(
+        self,
+        server_salt_b64: str,
+        server_verify_b64: str,
+        sync_result: Dict[str, Any]
+    ) -> None:
+        """Prompt user when local encryption salt differs from cloud vault salt."""
+        dialog = Adw.AlertDialog(
+            heading="Cloud Vault Key Mismatch",
+            body="This computer is using a different encryption key than your cloud vault. "
+                 "Enter the Master Password for the cloud vault to link this computer and decrypt all notes:"
+        )
+        pwd_entry = Gtk.PasswordEntry(placeholder_text="Cloud Vault Master Password")
+        dialog.set_extra_child(pwd_entry)
+
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("link", "Link & Decrypt")
+        dialog.set_response_appearance("link", Adw.ResponseAppearance.SUGGESTED)
+
+        def on_response(_dlg: Adw.AlertDialog, response: str) -> None:
+            if response != "link":
+                return
+            pwd = pwd_entry.get_text()
+            if not pwd:
+                self.show_toast("Master Password is required.")
+                return
+
+            try:
+                salt_bytes = base64.b64decode(server_salt_b64)
+                verify_bytes = base64.b64decode(server_verify_b64)
+            except Exception:
+                self.show_toast("Failed to parse cloud credentials.")
+                return
+
+            if not self.crypto.unlock(pwd, salt_bytes, verify_bytes):
+                self.show_toast("Incorrect Master Password for cloud vault.")
+                return
+
+            self.db.replace_master_credentials(salt_bytes, verify_bytes)
+            self.db.reset_local_vault_notes()
+
+            applied = 0
+            for rn in sync_result.get("remote_notes", []):
+                u = rn.get("uuid")
+                enc_t = rn.get("enc_title", "")
+                enc_c = rn.get("enc_content", "")
+                upd = rn.get("updated_at", "")
+                is_del = bool(rn.get("is_deleted", False))
+                fav_pos = int(rn.get("favorite_pos", -1))
+                if u and self.db.apply_remote_sync_note(u, enc_t, enc_c, upd, is_del, fav_pos):
+                    applied += 1
+
+            server_ts = sync_result.get("sync_timestamp", "")
+            if server_ts:
+                self.db.set_meta_string("sync_last_time", server_ts)
+
+            self.db.rebuild_favorites_table()
+            self.refresh_notes_list()
+            self._refresh_favorites_bar()
+            self.show_toast(f"Cloud vault linked! {applied} notes decrypted successfully.")
+
+        dialog.connect("response", on_response)
+        dialog.present(self)
+
     def _on_sync_success(self, result: Dict[str, Any], silent: bool) -> bool:
+        vault_info = result.get("vault", {})
+        server_salt = vault_info.get("salt", "")
+        server_verify = vault_info.get("verify_token", "")
+        local_salt, _ = self.db.get_master_credentials_b64()
+
+        if server_salt and local_salt and server_salt != local_salt:
+            self._prompt_cloud_vault_adoption(server_salt, server_verify, result)
+            return GLib.SOURCE_REMOVE
+
         remote_notes = result.get("remote_notes", [])
         server_ts = result.get("sync_timestamp", "")
 

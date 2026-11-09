@@ -8,6 +8,7 @@ pinned favorites in 'favorites', and manages cloud synchronization metadata.
 
 from __future__ import annotations
 
+import base64
 import os
 import sqlite3
 import uuid
@@ -147,6 +148,24 @@ class DatabaseManager:
         rows = cursor.fetchall()
         meta_dict = {row["key"]: bytes(row["value"]) for row in rows}
         return meta_dict.get("salt"), meta_dict.get("verify_token")
+
+    def get_master_credentials_b64(self) -> Tuple[Optional[str], Optional[str]]:
+        """Retrieve stored salt and verify_token encoded as base64 strings."""
+        salt, verify = self.get_master_credentials()
+        s_b64 = base64.b64encode(salt).decode("utf-8") if salt else None
+        v_b64 = base64.b64encode(verify).decode("utf-8") if verify else None
+        return s_b64, v_b64
+
+    def replace_master_credentials(self, salt: bytes, verify_token: bytes) -> None:
+        """Overwrite PBKDF2 salt and Fernet verify_token with cloud vault credentials."""
+        self.save_master_credentials(salt, verify_token)
+
+    def reset_local_vault_notes(self) -> None:
+        """Clear all local notes, favorites, and sync cursor to adopt remote cloud vault cleanly."""
+        with self.conn:
+            self.conn.execute("DELETE FROM favorites")
+            self.conn.execute("DELETE FROM notes")
+            self.conn.execute("DELETE FROM meta WHERE key = 'sync_last_time'")
 
     # --- Sync Settings & Metadata Storage in 'meta' ---
 
